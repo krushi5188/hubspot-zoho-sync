@@ -3,20 +3,43 @@ const axios = require('axios');
 const HUBSPOT_TOKEN = process.env.HUBSPOT_TOKEN;
 const ZOHO_CLIENT_ID = process.env.ZOHO_CLIENT_ID;
 const ZOHO_CLIENT_SECRET = process.env.ZOHO_CLIENT_SECRET;
-const ZOHO_REFRESH_TOKEN = process.env.ZOHO_REFRESH_TOKEN;
+let ZOHO_REFRESH_TOKEN = process.env.ZOHO_REFRESH_TOKEN;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPOSITORY;
 
 let zohoAccessToken = null;
 
+async function updateGitHubSecret(newRefreshToken) {
+  try {
+    // Get repo public key for secret encryption
+    const keyRes = await axios.get(
+      `https://api.github.com/repos/${GITHUB_REPO}/actions/secrets/public-key`,
+      { headers: { Authorization: `Bearer ${GITHUB_TOKEN}`, 'X-GitHub-Api-Version': '2022-11-28' } }
+    );
+    const { key, key_id } = keyRes.data;
+
+    // Use libsodium to encrypt (via Node built-in for simplicity: base64 encode)
+    // GitHub requires libsodium encryption - we'll use a workaround via gh CLI in workflow
+    // For now just log the new token so workflow can capture it
+    console.log(`NEW_REFRESH_TOKEN=${newRefreshToken}`);
+  } catch (e) {
+    console.log('Could not update GitHub secret:', e.message);
+  }
+}
+
 async function getZohoAccessToken() {
-  const res = await axios.post('https://accounts.zoho.in/oauth/v2/token', null, {
-    params: {
-      refresh_token: ZOHO_REFRESH_TOKEN,
-      client_id: ZOHO_CLIENT_ID,
-      client_secret: ZOHO_CLIENT_SECRET,
-      grant_type: 'refresh_token'
-    }
-  });
+  const params = new URLSearchParams();
+  params.append('refresh_token', ZOHO_REFRESH_TOKEN);
+  params.append('client_id', ZOHO_CLIENT_ID);
+  params.append('client_secret', ZOHO_CLIENT_SECRET);
+  params.append('grant_type', 'refresh_token');
+
+  const res = await axios.post('https://accounts.zoho.in/oauth/v2/token', params);
   zohoAccessToken = res.data.access_token;
+  if (res.data.refresh_token) {
+    ZOHO_REFRESH_TOKEN = res.data.refresh_token;
+    console.log(`NEW_REFRESH_TOKEN=${res.data.refresh_token}`);
+  }
   console.log('Zoho access token refreshed');
 }
 
@@ -37,7 +60,8 @@ async function zohoPost(module, data) {
     );
     return res.data;
   } catch (e) {
-    console.error(`Zoho ${module} error:`, e.response?.data || e.message);
+    console.log(`Zoho ${module} error:`, e.response ? e.response.data : e.message);
+    return null;
   }
 }
 
@@ -46,32 +70,31 @@ async function syncContacts() {
   let after = undefined;
   let total = 0;
   do {
-    const params = { limit: 100, properties: 'firstname,lastname,email,phone,company,jobtitle,address,city,state,country,zip,website,lifecyclestage,hs_lead_status,createdate,lastmodifieddate' };
+    const params = { limit: 100, properties: 'firstname,lastname,email,phone,company,jobtitle,website,address,city,state,country,zip,lifecyclestage,hs_lead_status,notes_last_contacted,createdate' };
     if (after) params.after = after;
-    const data = await hubspotGet('/crm/v3/objects/contacts', params);
-    for (const c of data.results) {
+    const res = await hubspotGet('/crm/v3/objects/contacts', params);
+    for (const c of res.results) {
       const p = c.properties;
       await zohoPost('Contacts', {
         First_Name: p.firstname || '',
-        Last_Name: p.lastname || '(unknown)',
-        Email: p.email,
-        Phone: p.phone,
-        Account_Name: p.company,
-        Title: p.jobtitle,
-        Mailing_Street: p.address,
-        Mailing_City: p.city,
-        Mailing_State: p.state,
-        Mailing_Country: p.country,
-        Mailing_Zip: p.zip,
-        Website: p.website,
-        Lead_Source: 'HubSpot',
-        Description: `HS ID: ${c.id} | Stage: ${p.lifecyclestage || ''}`
+        Last_Name: p.lastname || 'Unknown',
+        Email: p.email || '',
+        Phone: p.phone || '',
+        Account_Name: p.company || '',
+        Title: p.jobtitle || '',
+        Website: p.website || '',
+        Mailing_Street: p.address || '',
+        Mailing_City: p.city || '',
+        Mailing_State: p.state || '',
+        Mailing_Country: p.country || '',
+        Mailing_Zip: p.zip || '',
+        Lead_Source: 'HubSpot'
       });
       total++;
     }
-    after = data.paging?.next?.after;
+    after = res.paging && res.paging.next ? res.paging.next.after : undefined;
   } while (after);
-  console.log(`Contacts synced: ${total}`);
+  console.log(`Synced ${total} contacts`);
 }
 
 async function syncCompanies() {
@@ -79,29 +102,29 @@ async function syncCompanies() {
   let after = undefined;
   let total = 0;
   do {
-    const params = { limit: 100, properties: 'name,domain,phone,city,state,country,zip,industry,numberofemployees,annualrevenue,description,createdate' };
+    const params = { limit: 100, properties: 'name,domain,phone,industry,city,state,country,zip,numberofemployees,annualrevenue,description,createdate' };
     if (after) params.after = after;
-    const data = await hubspotGet('/crm/v3/objects/companies', params);
-    for (const c of data.results) {
+    const res = await hubspotGet('/crm/v3/objects/companies', params);
+    for (const c of res.results) {
       const p = c.properties;
       await zohoPost('Accounts', {
         Account_Name: p.name || 'Unknown',
-        Website: p.domain,
-        Phone: p.phone,
-        Billing_City: p.city,
-        Billing_State: p.state,
-        Billing_Country: p.country,
-        Billing_Code: p.zip,
-        Industry: p.industry,
-        Employees: p.numberofemployees,
-        Annual_Revenue: p.annualrevenue,
-        Description: p.description || `HS ID: ${c.id}`
+        Website: p.domain || '',
+        Phone: p.phone || '',
+        Industry: p.industry || '',
+        Billing_City: p.city || '',
+        Billing_State: p.state || '',
+        Billing_Country: p.country || '',
+        Billing_Code: p.zip || '',
+        Employees: p.numberofemployees || '',
+        Annual_Revenue: p.annualrevenue || '',
+        Description: p.description || ''
       });
       total++;
     }
-    after = data.paging?.next?.after;
+    after = res.paging && res.paging.next ? res.paging.next.after : undefined;
   } while (after);
-  console.log(`Companies synced: ${total}`);
+  console.log(`Synced ${total} companies`);
 }
 
 async function syncDeals() {
@@ -109,36 +132,32 @@ async function syncDeals() {
   let after = undefined;
   let total = 0;
   do {
-    const params = { limit: 100, properties: 'dealname,amount,dealstage,pipeline,closedate,description,createdate,hs_lastmodifieddate' };
+    const params = { limit: 100, properties: 'dealname,amount,dealstage,pipeline,closedate,hubspot_owner_id,description,createdate' };
     if (after) params.after = after;
-    const data = await hubspotGet('/crm/v3/objects/deals', params);
-    for (const d of data.results) {
+    const res = await hubspotGet('/crm/v3/objects/deals', params);
+    for (const d of res.results) {
       const p = d.properties;
+      const stageMap = {
+        'appointmentscheduled': 'Qualification',
+        'qualifiedtobuy': 'Needs Analysis',
+        'presentationscheduled': 'Value Proposition',
+        'decisionmakerboughtin': 'Id. Decision Makers',
+        'contractsent': 'Perception Analysis',
+        'closedwon': 'Closed Won',
+        'closedlost': 'Closed Lost'
+      };
       await zohoPost('Deals', {
-        Deal_Name: p.dealname || 'Unnamed Deal',
+        Deal_Name: p.dealname || 'Untitled Deal',
         Amount: parseFloat(p.amount) || 0,
-        Stage: mapDealStage(p.dealstage),
+        Stage: stageMap[p.dealstage] || 'Qualification',
         Closing_Date: p.closedate ? p.closedate.split('T')[0] : new Date().toISOString().split('T')[0],
-        Description: p.description || `HS ID: ${d.id} | Pipeline: ${p.pipeline || ''}`
+        Description: p.description || ''
       });
       total++;
     }
-    after = data.paging?.next?.after;
+    after = res.paging && res.paging.next ? res.paging.next.after : undefined;
   } while (after);
-  console.log(`Deals synced: ${total}`);
-}
-
-function mapDealStage(stage) {
-  const map = {
-    appointmentscheduled: 'Qualification',
-    qualifiedtobuy: 'Needs Analysis',
-    presentationscheduled: 'Value Proposition',
-    decisionmakerboughtin: 'Id. Decision Makers',
-    contractsent: 'Perception Analysis',
-    closedwon: 'Closed Won',
-    closedlost: 'Closed Lost'
-  };
-  return map[stage] || 'Qualification';
+  console.log(`Synced ${total} deals`);
 }
 
 async function syncNotes() {
@@ -148,20 +167,18 @@ async function syncNotes() {
   do {
     const params = { limit: 100, properties: 'hs_note_body,hs_timestamp,createdate' };
     if (after) params.after = after;
-    const data = await hubspotGet('/crm/v3/objects/notes', params);
-    for (const n of data.results) {
+    const res = await hubspotGet('/crm/v3/objects/notes', params);
+    for (const n of res.results) {
       const p = n.properties;
-      if (!p.hs_note_body) continue;
       await zohoPost('Notes', {
         Note_Title: 'Note from HubSpot',
-        Note_Content: p.hs_note_body,
-        $se_module: 'Contacts'
+        Note_Content: p.hs_note_body || ''
       });
       total++;
     }
-    after = data.paging?.next?.after;
+    after = res.paging && res.paging.next ? res.paging.next.after : undefined;
   } while (after);
-  console.log(`Notes synced: ${total}`);
+  console.log(`Synced ${total} notes`);
 }
 
 async function syncTasks() {
@@ -169,10 +186,10 @@ async function syncTasks() {
   let after = undefined;
   let total = 0;
   do {
-    const params = { limit: 100, properties: 'hs_task_subject,hs_task_body,hs_task_status,hs_timestamp,hs_task_priority,hs_task_type' };
+    const params = { limit: 100, properties: 'hs_task_subject,hs_task_body,hs_task_status,hs_task_priority,hs_timestamp,createdate' };
     if (after) params.after = after;
-    const data = await hubspotGet('/crm/v3/objects/tasks', params);
-    for (const t of data.results) {
+    const res = await hubspotGet('/crm/v3/objects/tasks', params);
+    for (const t of res.results) {
       const p = t.properties;
       await zohoPost('Tasks', {
         Subject: p.hs_task_subject || 'Task from HubSpot',
@@ -183,9 +200,9 @@ async function syncTasks() {
       });
       total++;
     }
-    after = data.paging?.next?.after;
+    after = res.paging && res.paging.next ? res.paging.next.after : undefined;
   } while (after);
-  console.log(`Tasks synced: ${total}`);
+  console.log(`Synced ${total} tasks`);
 }
 
 async function syncMeetings() {
@@ -193,10 +210,10 @@ async function syncMeetings() {
   let after = undefined;
   let total = 0;
   do {
-    const params = { limit: 100, properties: 'hs_meeting_title,hs_meeting_body,hs_meeting_start_time,hs_meeting_end_time,hs_meeting_outcome' };
+    const params = { limit: 100, properties: 'hs_meeting_title,hs_meeting_body,hs_meeting_start_time,hs_meeting_end_time,hs_meeting_outcome,createdate' };
     if (after) params.after = after;
-    const data = await hubspotGet('/crm/v3/objects/meetings', params);
-    for (const m of data.results) {
+    const res = await hubspotGet('/crm/v3/objects/meetings', params);
+    for (const m of res.results) {
       const p = m.properties;
       await zohoPost('Events', {
         Event_Title: p.hs_meeting_title || 'Meeting from HubSpot',
@@ -206,9 +223,9 @@ async function syncMeetings() {
       });
       total++;
     }
-    after = data.paging?.next?.after;
+    after = res.paging && res.paging.next ? res.paging.next.after : undefined;
   } while (after);
-  console.log(`Meetings synced: ${total}`);
+  console.log(`Synced ${total} meetings`);
 }
 
 async function syncCalls() {
@@ -216,67 +233,40 @@ async function syncCalls() {
   let after = undefined;
   let total = 0;
   do {
-    const params = { limit: 100, properties: 'hs_call_title,hs_call_body,hs_call_direction,hs_call_duration,hs_call_status,hs_timestamp' };
+    const params = { limit: 100, properties: 'hs_call_title,hs_call_body,hs_call_duration,hs_call_status,hs_call_direction,hs_timestamp,createdate' };
     if (after) params.after = after;
-    const data = await hubspotGet('/crm/v3/objects/calls', params);
-    for (const c of data.results) {
+    const res = await hubspotGet('/crm/v3/objects/calls', params);
+    for (const c of res.results) {
       const p = c.properties;
       await zohoPost('Calls', {
         Subject: p.hs_call_title || 'Call from HubSpot',
         Description: p.hs_call_body || '',
-        Direction: p.hs_call_direction === 'OUTBOUND' ? 'Outbound' : 'Inbound',
-        Duration: Math.round((parseInt(p.hs_call_duration) || 0) / 1000 / 60),
-        Call_Result: p.hs_call_status || 'Completed',
+        Duration: p.hs_call_duration ? Math.floor(parseInt(p.hs_call_duration) / 1000 / 60) + ' minutes' : '0 minutes',
+        Call_Result: p.hs_call_status || '',
         Call_Start_Time: p.hs_timestamp || new Date().toISOString()
       });
       total++;
     }
-    after = data.paging?.next?.after;
+    after = res.paging && res.paging.next ? res.paging.next.after : undefined;
   } while (after);
-  console.log(`Calls synced: ${total}`);
-}
-
-async function syncEmailActivity() {
-  console.log('Syncing email sends...');
-  let after = undefined;
-  let total = 0;
-  do {
-    const params = { limit: 100, properties: 'hs_email_subject,hs_email_text,hs_email_status,hs_email_direction,hs_timestamp,hs_email_from_email,hs_email_to_email' };
-    if (after) params.after = after;
-    const data = await hubspotGet('/crm/v3/objects/emails', params);
-    for (const e of data.results) {
-      const p = e.properties;
-      await zohoPost('Activities', {
-        Activity_Type: 'Email',
-        Subject: p.hs_email_subject || 'Email from HubSpot',
-        Description: `From: ${p.hs_email_from_email || ''} To: ${p.hs_email_to_email || ''}\n\n${p.hs_email_text || ''}`,
-        Status: 'Completed'
-      });
-      total++;
-    }
-    after = data.paging?.next?.after;
-  } while (after);
-  console.log(`Emails synced: ${total}`);
+  console.log(`Synced ${total} calls`);
 }
 
 async function main() {
   console.log('Starting HubSpot -> Zoho CRM sync...');
   console.log(new Date().toISOString());
-  try {
-    await getZohoAccessToken();
-    await syncContacts();
-    await syncCompanies();
-    await syncDeals();
-    await syncNotes();
-    await syncTasks();
-    await syncMeetings();
-    await syncCalls();
-    await syncEmailActivity();
-    console.log('Sync completed successfully!');
-  } catch (err) {
-    console.error('Sync failed:', err.message);
-    process.exit(1);
-  }
+  await getZohoAccessToken();
+  await syncContacts();
+  await syncCompanies();
+  await syncDeals();
+  await syncNotes();
+  await syncTasks();
+  await syncMeetings();
+  await syncCalls();
+  console.log('Sync complete!');
 }
 
-main();
+main().catch(err => {
+  console.error('Sync failed:', err.message);
+  process.exit(1);
+});
