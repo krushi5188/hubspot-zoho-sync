@@ -4,7 +4,7 @@ const HUBSPOT_TOKEN = process.env.HUBSPOT_TOKEN;
 const ZOHO_CLIENT_ID = process.env.ZOHO_CLIENT_ID;
 const ZOHO_CLIENT_SECRET = process.env.ZOHO_CLIENT_SECRET;
 let ZOHO_REFRESH_TOKEN = process.env.ZOHO_REFRESH_TOKEN;
-const GITHUB_TOKEN = process.env.GH_TOKEN; // ← fixed: workflow passes GH_TOKEN
+const GITHUB_TOKEN = process.env.GH_TOKEN;
 const GITHUB_REPO = process.env.GITHUB_REPOSITORY;
 
 let zohoAccessToken = null;
@@ -131,51 +131,6 @@ async function syncDeals() {
   console.log(`Synced ${total} deals`);
 }
 
-// ✅ Only ONE definition of syncNotes
-async function syncNotes() {
-  console.log('Syncing notes...');
-  let after, total = 0;
-  do {
-    const params = { limit: 100, properties: 'hs_note_body,hs_timestamp,createdate' };
-    if (after) params.after = after;
-    const res = await hubspotGet('/crm/v3/objects/notes', params);
-    for (const n of res.results) {
-      const p = n.properties;
-      await zohoPost('Notes', {
-        Note_Title: p.hs_note_body ? p.hs_note_body.substring(0, 100) : 'Note from HubSpot',
-        Note_Content: p.hs_note_body || ''
-      });
-      total++;
-    }
-    after = res.paging?.next?.after;
-  } while (after);
-  console.log(`Synced ${total} notes`);
-}
-
-// ✅ Only ONE definition of syncTasks
-async function syncTasks() {
-  console.log('Syncing tasks...');
-  let after, total = 0;
-  do {
-    const params = { limit: 100, properties: 'hs_task_subject,hs_task_body,hs_task_status,hs_task_priority,hs_timestamp' };
-    if (after) params.after = after;
-    const res = await hubspotGet('/crm/v3/objects/tasks', params);
-    for (const t of res.results) {
-      const p = t.properties;
-      await zohoPost('Tasks', {
-        Subject: p.hs_task_subject || 'Task from HubSpot',
-        Description: p.hs_task_body || '',
-        Status: p.hs_task_status === 'COMPLETED' ? 'Completed' : 'Not Started',
-        Priority: p.hs_task_priority === 'HIGH' ? 'High' : 'Normal',
-        Due_Date: p.hs_timestamp ? p.hs_timestamp.split('T')[0] : new Date().toISOString().split('T')[0]
-      });
-      total++;
-    }
-    after = res.paging?.next?.after;
-  } while (after);
-  console.log(`Synced ${total} tasks`);
-}
-
 async function syncMeetings() {
   console.log('Syncing meetings...');
   let after, total = 0;
@@ -220,33 +175,113 @@ async function syncCalls() {
   console.log(`Synced ${total} calls`);
 }
 
-async function syncEmails() {
-  console.log('Syncing emails...');
+// Syncs HubSpot notes -> Zoho Notes
+async function syncNotes() {
+  console.log('Syncing notes...');
   let after, total = 0;
   do {
-    const params = { limit: 100, properties: 'hs_email_subject,hs_email_text,hs_email_status' };
+    const params = { limit: 100, properties: 'hs_note_body,hs_timestamp,createdate' };
     if (after) params.after = after;
-    const res = await hubspotGet('/crm/v3/objects/emails', params);
-    for (const email of res.results) {
-      const e = email.properties;
-      await zohoPost('Activities', {
-        Subject: e.hs_email_subject || 'Email from HubSpot',
-        Activity_Type: 'Email',
-        Description: e.hs_email_text || '',
-        Status: e.hs_email_status || 'Sent'
+    const res = await hubspotGet('/crm/v3/objects/notes', params);
+    for (const n of res.results) {
+      const p = n.properties;
+      await zohoPost('Notes', {
+        Note_Title: p.hs_note_body ? p.hs_note_body.substring(0, 100) : 'Note from HubSpot',
+        Note_Content: p.hs_note_body || ''
       });
       total++;
     }
     after = res.paging?.next?.after;
   } while (after);
-  console.log(`Synced ${total} emails`);
+  console.log(`Synced ${total} notes`);
 }
 
-// ✅ FIXED main() — getZohoAccessToken() called first
+async function syncTasks() {
+  console.log('Syncing tasks...');
+  let after, total = 0;
+  do {
+    const params = { limit: 100, properties: 'hs_task_subject,hs_task_body,hs_task_status,hs_task_priority,hs_timestamp' };
+    if (after) params.after = after;
+    const res = await hubspotGet('/crm/v3/objects/tasks', params);
+    for (const t of res.results) {
+      const p = t.properties;
+      await zohoPost('Tasks', {
+        Subject: p.hs_task_subject || 'Task from HubSpot',
+        Description: p.hs_task_body || '',
+        Status: p.hs_task_status === 'COMPLETED' ? 'Completed' : 'Not Started',
+        Priority: p.hs_task_priority === 'HIGH' ? 'High' : 'Normal',
+        Due_Date: p.hs_timestamp ? p.hs_timestamp.split('T')[0] : new Date().toISOString().split('T')[0]
+      });
+      total++;
+    }
+    after = res.paging?.next?.after;
+  } while (after);
+  console.log(`Synced ${total} tasks`);
+}
+
+// Syncs HubSpot emails -> Zoho Notes
+// Zoho CRM does not support direct email sync via API, so we convert emails to notes
+async function syncEmailsAsNotes() {
+  console.log('Syncing emails as notes...');
+  let after, total = 0;
+  do {
+    const params = {
+      limit: 100,
+      properties: [
+        'hs_email_subject',
+        'hs_email_text',
+        'hs_email_html',
+        'hs_email_status',
+        'hs_email_direction',
+        'hs_email_from_email',
+        'hs_email_from_firstname',
+        'hs_email_from_lastname',
+        'hs_email_to_email',
+        'hs_email_to_firstname',
+        'hs_email_to_lastname',
+        'hs_timestamp',
+        'createdate'
+      ].join(',')
+    };
+    if (after) params.after = after;
+    const res = await hubspotGet('/crm/v3/objects/emails', params);
+    for (const email of res.results) {
+      const p = email.properties;
+
+      const fromName = [p.hs_email_from_firstname, p.hs_email_from_lastname].filter(Boolean).join(' ') || p.hs_email_from_email || 'Unknown';
+      const toName = [p.hs_email_to_firstname, p.hs_email_to_lastname].filter(Boolean).join(' ') || p.hs_email_to_email || 'Unknown';
+      const direction = p.hs_email_direction || 'EMAIL';
+      const status = p.hs_email_status || 'SENT';
+      const subject = p.hs_email_subject || '(No Subject)';
+      const body = p.hs_email_text || p.hs_email_html || '(No Body)';
+      const timestamp = p.hs_timestamp ? new Date(p.hs_timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
+
+      const noteTitle = `[Email] ${subject}`.substring(0, 255);
+      const noteContent = [
+        `Direction: ${direction}`,
+        `Status: ${status}`,
+        `From: ${fromName}${p.hs_email_from_email ? ' <' + p.hs_email_from_email + '>' : ''}`,
+        `To: ${toName}${p.hs_email_to_email ? ' <' + p.hs_email_to_email + '>' : ''}`,
+        timestamp ? `Date: ${timestamp}` : '',
+        '',
+        body
+      ].filter(line => line !== null && line !== undefined).join('\n');
+
+      await zohoPost('Notes', {
+        Note_Title: noteTitle,
+        Note_Content: noteContent
+      });
+      total++;
+    }
+    after = res.paging?.next?.after;
+  } while (after);
+  console.log(`Synced ${total} emails as notes`);
+}
+
 async function main() {
   console.log('Starting HubSpot to Zoho sync...');
   try {
-    await getZohoAccessToken(); // ← THIS WAS THE MISSING LINE
+    await getZohoAccessToken();
     await syncContacts();
     await syncCompanies();
     await syncDeals();
@@ -254,7 +289,7 @@ async function main() {
     await syncCalls();
     await syncNotes();
     await syncTasks();
-    await syncEmails();
+    await syncEmailsAsNotes();
     console.log('\n=== Sync completed successfully! ===');
   } catch (error) {
     console.error('Sync failed:', error);
