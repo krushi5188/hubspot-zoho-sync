@@ -252,6 +252,31 @@ async function syncCalls() {
   console.log(`Synced ${total} calls`);
 }
 
+async function syncEmails() {
+  console.log('Syncing emails...');
+  let after = undefined;
+  let total = 0;
+  do {
+    const params = { limit: 100, properties: 'hs_email_subject,hs_email_text,hs_email_html,hs_email_status,hs_email_direction,hs_timestamp,createdate' };
+    if (after) params.after = after;
+    const res = await hubspotGet('/crm/v3/objects/emails', params);
+    for (const e of res.results) {
+      const p = e.properties;
+      const isOpened = p.hs_email_status === 'OPENED' || p.hs_email_status === 'CLICKED';
+      const direction = p.hs_email_direction === 'EMAIL' ? 'Sent' : 'Received';
+      const emailBody = p.hs_email_html || p.hs_email_text || '';
+      
+      await zohoPost('Notes', {
+        Note_Title: `📧 ${direction}: ${p.hs_email_subject || 'No Subject'}`,
+        Note_Content: `Email ${direction} on ${p.hs_timestamp || p.createdate}\n\nStatus: ${isOpened ? '✅ Opened' : '📬 Sent'}\n\nSubject: ${p.hs_email_subject || 'No Subject'}\n\n${emailBody}`
+      });
+      total++;
+    }
+    after = res.paging && res.paging.next ? res.paging.next.after : undefined;
+  } while (after);
+  console.log(`Synced ${total} emails`);
+}
+
 async function main() {
   console.log('Starting HubSpot -> Zoho CRM sync...');
   console.log(new Date().toISOString());
@@ -263,6 +288,7 @@ async function main() {
   await syncTasks();
   await syncMeetings();
   await syncCalls();
+    await syncEmails();
   console.log('Sync complete!');
 }
 
