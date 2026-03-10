@@ -1,0 +1,13 @@
+{
+  "name": "hubspot-zoho-sync",
+  "version": "1.0.0",
+  "description": "Sync HubSpot CRM data to Zoho CRM automatically",
+  "main": "sync.js",
+  "scripts": {
+    "sync": "node sync.js",
+    "get-token": "node get_token.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}
