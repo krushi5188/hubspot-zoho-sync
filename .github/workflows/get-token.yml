@@ -1,0 +1,25 @@
+name: Get Zoho Refresh Token
+
+on:
+  workflow_dispatch:
+    inputs:
+      grant_code:
+        description: 'Zoho grant code from API console'
+        required: true
+
+jobs:
+  get-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exchange grant code for refresh token
+        run: |
+          RESPONSE=$(curl -s -X POST https://accounts.zoho.in/oauth/v2/token \
+            -d "grant_type=authorization_code" \
+            -d "client_id=${{ secrets.ZOHO_CLIENT_ID }}" \
+            -d "client_secret=${{ secrets.ZOHO_CLIENT_SECRET }}" \
+            -d "redirect_uri=https://www.zoho.in" \
+            -d "code=${{ github.event.inputs.grant_code }}")
+          echo "Response: $RESPONSE"
+          REFRESH_TOKEN=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin).get('refresh_token','NOT_FOUND'))")
+          echo "REFRESH_TOKEN=$REFRESH_TOKEN"
+          echo "::notice::Refresh Token: $REFRESH_TOKEN"
