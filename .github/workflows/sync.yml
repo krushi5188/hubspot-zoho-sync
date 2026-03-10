@@ -8,6 +8,10 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      secrets: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,9 +25,20 @@ jobs:
         run: npm install
 
       - name: Run sync
+        id: run_sync
         env:
           HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
           ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
-        run: node sync.js
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          OUTPUT=$(node sync.js 2>&1)
+          echo "$OUTPUT"
+          NEW_TOKEN=$(echo "$OUTPUT" | grep 'NEW_REFRESH_TOKEN=' | tail -1 | cut -d'=' -f2-)
+          if [ -n "$NEW_TOKEN" ]; then
+            echo "Updating ZOHO_REFRESH_TOKEN secret..."
+            echo "$NEW_TOKEN" | gh secret set ZOHO_REFRESH_TOKEN
+            echo "Secret updated successfully"
+          fi
