@@ -8,9 +8,6 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      secrets: write
 
     steps:
       - name: Checkout
@@ -25,13 +22,12 @@ jobs:
         run: npm install
 
       - name: Run sync
-        id: run_sync
         env:
           HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
           ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
           ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
           ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           OUTPUT=$(node sync.js 2>&1)
