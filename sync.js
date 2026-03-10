@@ -267,10 +267,32 @@ async function syncEmailsAsNotes() {
         body
       ].filter(line => line !== null && line !== undefined).join('\n');
 
-      await zohoPost('Notes', {
-        Note_Title: noteTitle,
-        Note_Content: noteContent
-      });
+// Fetch which HubSpot contact this email is linked to
+          let zohoContactId = null;
+          try {
+            const assocRes = await axios.post(
+              'https://api.hubapi.com/crm/v3/associations/emails/contacts/batch/read',
+              { inputs: [{ id: email.id }] },
+              { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}` } }
+            );
+            const assocResults = assocRes.data?.results?.[0]?.to;
+            if (assocResults && assocResults.length > 0) {
+              const hubspotContactId = assocResults[0].id;
+              zohoContactId = zohoContactMap[hubspotContactId] || null;
+            }
+          } catch (e) {
+            // association fetch failed, note will still be created without parent
+          }
+
+          const notePayload = {
+            Note_Title: noteTitle,
+            Note_Content: noteContent
+          };
+          if (zohoContactId) {
+            notePayload.Parent_Id = zohoContactId;
+            notePayload.se_module = 'Contacts';
+          }
+          await zohoPost('Notes', notePayload);
       total++;
     }
     after = res.paging?.next?.after;
