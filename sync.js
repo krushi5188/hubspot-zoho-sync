@@ -43,9 +43,24 @@ async function hubspotGet(path, params = {}) {
 
 async function zohoPost(module, data) {
   try {
+        // Determine which field makes this record unique based on the module
+    let checkFields = [];
+    if (module === 'Contacts') checkFields = ['Email'];
+    if (module === 'Accounts') checkFields = ['Account_Name'];
+    if (module === 'Deals') checkFields = ['Deal_Name'];
+    
+    const payload = { 
+      data: [data]
+    };
+    
+    // Only add the duplicate check flag if we defined one
+    if (checkFields.length > 0) {
+      payload.duplicate_check_fields = checkFields;
+    }
+
     const res = await axios.post(
       `https://www.zohoapis.in/crm/v2/${module}/upsert`,
-      { data: [data] },
+      payload,
       { headers: { Authorization: `Zoho-oauthtoken ${zohoAccessToken}` } }
     );
     if (res.data?.data?.[0]?.details) return res.data.data[0].details.id;
