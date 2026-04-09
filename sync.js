@@ -190,7 +190,6 @@ async function syncCalls() {
   console.log(`Synced ${total} calls`);
 }
 
-// Syncs HubSpot notes -> Zoho Notes
 async function syncNotes() {
   console.log('Syncing notes...');
   let after, total = 0;
@@ -234,9 +233,35 @@ async function syncTasks() {
   console.log(`Synced ${total} tasks`);
 }
 
-// Syncs HubSpot emails -> Zoho Notes
 async function syncEmailsAsNotes() {
   console.log('Syncing emails as notes...');
+  
+  // --- SPEED OPTIMIZATION: Cache existing Zoho Notes ---
+  console.log('Caching existing Zoho Notes...');
+  const existingZohoNotes = {};
+  let notesPage = 1;
+  let hasMoreNotes = true;
+  
+  while (hasMoreNotes) {
+    try {
+      const notesRes = await axios.get(`https://www.zohoapis.in/crm/v2/Notes?page=${notesPage}&per_page=200`, {
+        headers: { Authorization: `Zoho-oauthtoken ${zohoAccessToken}` }
+      });
+      const notesData = notesRes.data.data || [];
+      for (const note of notesData) {
+        if (note.Parent_Id && note.Parent_Id.id) {
+          const parentId = note.Parent_Id.id;
+          if (!existingZohoNotes[parentId]) existingZohoNotes[parentId] = [];
+          existingZohoNotes[parentId].push(note);
+        }
+      }
+      hasMoreNotes = notesRes.data.info.more_records;
+      notesPage++;
+    } catch (e) {
+      hasMoreNotes = false;
+    }
+  }
+
   let after, total = 0;
   do {
     const params = {
@@ -254,14 +279,30 @@ async function syncEmailsAsNotes() {
         'hs_email_to_firstname',
         'hs_email_to_lastname',
         'hs_timestamp',
-        'createdate',
-        'hs_num_email_opens',
-        'hs_num_email_clicks'
+        'createdate'
       ].join(',')
     };
     if (after) params.after = after;
     const res = await hubspotGet('/crm/v3/objects/emails', params);
     
+    // Batch fetch associations for speed
+    const emailIds = res.results.map(e => ({ id: e.id }));
+    let assocMap = {};
+    if (emailIds.length > 0) {
+      try {
+        const assocRes = await axios.post(
+          'https://api.hubapi.com/crm/v3/associations/emails/contacts/batch/read',
+          { inputs: emailIds },
+          { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}` } }
+        );
+        for (const assoc of assocRes.data.results || []) {
+          if (assoc.to && assoc.to.length > 0) {
+            assocMap[assoc.from.id] = assoc.to[0].id;
+          }
+        }
+      } catch (e) {}
+    }
+
     for (const email of res.results) {
       const p = email.properties;
 
@@ -273,18 +314,12 @@ async function syncEmailsAsNotes() {
       const body = p.hs_email_text || p.hs_email_html || '(No Body)';
       const timestamp = p.hs_timestamp ? new Date(p.hs_timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
 
-      // Grab exactly how many times it was opened/clicked
-      const opens = parseInt(p.hs_num_email_opens) || 0;
-      const clicks = parseInt(p.hs_num_email_clicks) || 0;
-      const openStatus = opens > 0 ? `OPENED (${opens} times)` : 'UNOPENED';
-
       const noteTitle = `[Email] ${subject}`.substring(0, 255);
-      
-      // We embed the hidden HubSpot ID tag so we can perfectly track this exact email
       const idTag = `[HS_ID:${email.id}]`;
       
-      const noteContentBase = [
+      const fullNoteContent = [
         `Direction: ${direction}`,
+        `Status: ${status}`,
         `From: ${fromName}${p.hs_email_from_email ? ' <' + p.hs_email_from_email + '>' : ''}`,
         `To: ${toName}${p.hs_email_to_email ? ' <' + p.hs_email_to_email + '>' : ''}`,
         timestamp ? `Date: ${timestamp}` : '',
@@ -294,70 +329,31 @@ async function syncEmailsAsNotes() {
         idTag
       ].filter(line => line !== null && line !== undefined).join('\n');
 
-      // The final content block injected into Zoho
-      const fullNoteContent = `Status: ${status} | Read Receipt: ${openStatus}\nClicks: ${clicks}\n\n` + noteContentBase;
-
-      // Fetch which HubSpot contact this email is linked to
-      let zohoContactId = null;
-      try {
-        const assocRes = await axios.post(
-          'https://api.hubapi.com/crm/v3/associations/emails/contacts/batch/read',
-          { inputs: [{ id: email.id }] },
-          { headers: { Authorization: `Bearer ${HUBSPOT_TOKEN}` } }
-        );
-        const assocResults = assocRes.data?.results?.[0]?.to;
-        if (assocResults && assocResults.length > 0) {
-          const hubspotContactId = assocResults[0].id;
-          zohoContactId = zohoContactMap[hubspotContactId] || null;
-        }
-      } catch (e) {
-        // association fetch failed, note will still be created without parent
-      }
+      const hubspotContactId = assocMap[email.id];
+      const zohoContactId = hubspotContactId ? zohoContactMap[hubspotContactId] : null;
 
       if (zohoContactId) {
-        // 1. Pull existing notes for this Contact from Zoho
-        const existingNotesRes = await axios.get(
-          `https://www.zohoapis.in/crm/v2/Contacts/${zohoContactId}/Notes`,
-          { headers: { Authorization: `Zoho-oauthtoken ${zohoAccessToken}` } }
-        );
-        const existingNotes = existingNotesRes.data.data || [];
-
-        // 2. Search for our hidden HubSpot ID tag in the notes
-        const existingEmailNote = existingNotes.find(n => n.Note_Content && n.Note_Content.includes(idTag));
+        const contactNotes = existingZohoNotes[zohoContactId] || [];
+        const existingEmailNote = contactNotes.find(n => n.Note_Content && n.Note_Content.includes(idTag));
 
         if (existingEmailNote) {
-          // 3a. UPDATE the existing note (only if status, opens, or clicks have changed)
-          const currentHeader = `Status: ${status} | Read Receipt: ${openStatus}\nClicks: ${clicks}`;
-          
-          if (!existingEmailNote.Note_Content.includes(currentHeader)) {
+          // UPDATE the existing note only if the status changed (e.g. from SENT to OPENED)
+          if (!existingEmailNote.Note_Content.includes(`Status: ${status}`)) {
             await axios.put(
               `https://www.zohoapis.in/crm/v2/Notes/${existingEmailNote.id}`,
-              { 
-                data: [{ 
-                  Note_Title: noteTitle,
-                  Note_Content: fullNoteContent
-                }] 
-              },
+              { data: [{ Note_Title: noteTitle, Note_Content: fullNoteContent }] },
               { headers: { Authorization: `Zoho-oauthtoken ${zohoAccessToken}` } }
             );
           }
         } else {
-          // 3b. CREATE a new note
+          // CREATE a new note
           await axios.post(
             `https://www.zohoapis.in/crm/v2/Notes`,
-            { 
-              data: [{ 
-                Note_Title: noteTitle, 
-                Note_Content: fullNoteContent, 
-                Parent_Id: zohoContactId, 
-                se_module: 'Contacts' 
-              }] 
-            },
+            { data: [{ Note_Title: noteTitle, Note_Content: fullNoteContent, Parent_Id: zohoContactId, se_module: 'Contacts' }] },
             { headers: { Authorization: `Zoho-oauthtoken ${zohoAccessToken}` } }
           );
         }
       } else {
-        // If no contact ID is found, just create it without a parent ID
         await zohoPost('Notes', {
           Note_Title: noteTitle,
           Note_Content: fullNoteContent
