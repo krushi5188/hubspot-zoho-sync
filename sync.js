@@ -44,7 +44,7 @@ async function hubspotGet(path, params = {}) {
 async function zohoPost(module, data) {
   try {
     const res = await axios.post(
-      `https://www.zohoapis.in/crm/v2/${module}`,
+      `https://www.zohoapis.in/crm/v2/${module}/upsert`,
       { data: [data] },
       { headers: { Authorization: `Zoho-oauthtoken ${zohoAccessToken}` } }
     );
