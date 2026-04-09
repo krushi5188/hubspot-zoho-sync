@@ -235,7 +235,6 @@ async function syncTasks() {
 }
 
 // Syncs HubSpot emails -> Zoho Notes
-// Zoho CRM does not support direct email sync via API, so we convert emails to notes
 async function syncEmailsAsNotes() {
   console.log('Syncing emails as notes...');
   let after, total = 0;
@@ -255,7 +254,9 @@ async function syncEmailsAsNotes() {
         'hs_email_to_firstname',
         'hs_email_to_lastname',
         'hs_timestamp',
-        'createdate'
+        'createdate',
+        'hs_num_email_opens',
+        'hs_num_email_clicks'
       ].join(',')
     };
     if (after) params.after = after;
@@ -272,6 +273,11 @@ async function syncEmailsAsNotes() {
       const body = p.hs_email_text || p.hs_email_html || '(No Body)';
       const timestamp = p.hs_timestamp ? new Date(p.hs_timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
 
+      // Grab exactly how many times it was opened/clicked
+      const opens = parseInt(p.hs_num_email_opens) || 0;
+      const clicks = parseInt(p.hs_num_email_clicks) || 0;
+      const openStatus = opens > 0 ? `OPENED (${opens} times)` : 'UNOPENED';
+
       const noteTitle = `[Email] ${subject}`.substring(0, 255);
       
       // We embed the hidden HubSpot ID tag so we can perfectly track this exact email
@@ -287,6 +293,9 @@ async function syncEmailsAsNotes() {
         '',
         idTag
       ].filter(line => line !== null && line !== undefined).join('\n');
+
+      // The final content block injected into Zoho
+      const fullNoteContent = `Status: ${status} | Read Receipt: ${openStatus}\nClicks: ${clicks}\n\n` + noteContentBase;
 
       // Fetch which HubSpot contact this email is linked to
       let zohoContactId = null;
@@ -317,14 +326,16 @@ async function syncEmailsAsNotes() {
         const existingEmailNote = existingNotes.find(n => n.Note_Content && n.Note_Content.includes(idTag));
 
         if (existingEmailNote) {
-          // 3a. UPDATE the existing note (only if status changed)
-          if (!existingEmailNote.Note_Content.includes(`Status: ${status}`)) {
+          // 3a. UPDATE the existing note (only if status, opens, or clicks have changed)
+          const currentHeader = `Status: ${status} | Read Receipt: ${openStatus}\nClicks: ${clicks}`;
+          
+          if (!existingEmailNote.Note_Content.includes(currentHeader)) {
             await axios.put(
               `https://www.zohoapis.in/crm/v2/Notes/${existingEmailNote.id}`,
               { 
                 data: [{ 
                   Note_Title: noteTitle,
-                  Note_Content: `Status: ${status}\n` + noteContentBase
+                  Note_Content: fullNoteContent
                 }] 
               },
               { headers: { Authorization: `Zoho-oauthtoken ${zohoAccessToken}` } }
@@ -337,7 +348,7 @@ async function syncEmailsAsNotes() {
             { 
               data: [{ 
                 Note_Title: noteTitle, 
-                Note_Content: `Status: ${status}\n` + noteContentBase, 
+                Note_Content: fullNoteContent, 
                 Parent_Id: zohoContactId, 
                 se_module: 'Contacts' 
               }] 
@@ -349,7 +360,7 @@ async function syncEmailsAsNotes() {
         // If no contact ID is found, just create it without a parent ID
         await zohoPost('Notes', {
           Note_Title: noteTitle,
-          Note_Content: `Status: ${status}\n` + noteContentBase
+          Note_Content: fullNoteContent
         });
       }
       total++;
