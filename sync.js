@@ -80,7 +80,8 @@ async function syncContacts() {
   console.log('Syncing contacts...');
   let after, total = 0;
   do {
-    const params = { limit: 100, properties: 'firstname,lastname,email,phone,company,jobtitle,website,address,city,state,country,zip' };
+    // We added the open/click timestamps here to use them globally
+    const params = { limit: 100, properties: 'firstname,lastname,email,phone,company,jobtitle,website,address,city,state,country,zip,hs_sales_email_last_opened,hs_sales_email_last_clicked' };
     if (after) params.after = after;
     const res = await hubspotGet('/crm/v3/objects/contacts', params);
     for (const c of res.results) {
@@ -94,7 +95,14 @@ async function syncContacts() {
         Title: p.jobtitle || '',
         Lead_Source: 'HubSpot'
       });
-      if (zohoId) zohoContactMap[c.id] = zohoId;
+      // Store the open timestamps in memory to check emails against later
+      if (zohoId) {
+        zohoContactMap[c.id] = {
+          id: zohoId,
+          lastOpened: p.hs_sales_email_last_opened,
+          lastClicked: p.hs_sales_email_last_clicked
+        };
+      }
       total++;
     }
     after = res.paging?.next?.after;
@@ -301,33 +309,30 @@ async function syncEmailsAsNotes() {
 
     for (const email of res.results) {
       const p = email.properties;
-      const recipientEmail = p.hs_email_to_email;
       
-      // -- CHECK EVENTS API FOR OPENS --
-      let isOpened = false;
-      if (recipientEmail && p.hs_email_direction !== 'INCOMING_EMAIL') {
-        try {
-          const eventsRes = await hubspotGet('/email/public/v1/events', {
-            recipient: recipientEmail,
-            eventType: 'OPEN',
-            limit: 50
-          });
-          
-          if (eventsRes.events && eventsRes.events.length > 0) {
-            isOpened = true; 
-          }
-        } catch (e) {
-          // Ignore event fetch errors (e.g. strict scope limits)
+      const hubspotContactId = assocMap[email.id];
+      const contactInfo = hubspotContactId ? zohoContactMap[hubspotContactId] : null;
+      const zohoContactId = contactInfo ? contactInfo.id : null;
+
+      // -- THE NATIVE HEURISTIC FIX --
+      // Compare the time the email was sent to the exact time the Contact last opened an email
+      let status = p.hs_email_status || 'SENT';
+      if ((status === 'SENT' || status === 'DELIVERED') && p.hs_email_direction === 'EMAIL' && contactInfo && p.hs_timestamp) {
+        const sentTime = new Date(p.hs_timestamp).getTime();
+        const openedTime = contactInfo.lastOpened ? new Date(contactInfo.lastOpened).getTime() : 0;
+        const clickedTime = contactInfo.lastClicked ? new Date(contactInfo.lastClicked).getTime() : 0;
+        
+        // If the contact's internal tracker fired AFTER this email was sent, we know it was opened!
+        if (clickedTime >= sentTime) {
+          status = 'CLICKED';
+        } else if (openedTime >= sentTime) {
+          status = 'OPENED';
         }
       }
 
       const fromName = [p.hs_email_from_firstname, p.hs_email_from_lastname].filter(Boolean).join(' ') || p.hs_email_from_email || 'Unknown';
       const toName = [p.hs_email_to_firstname, p.hs_email_to_lastname].filter(Boolean).join(' ') || p.hs_email_to_email || 'Unknown';
       const direction = p.hs_email_direction || 'EMAIL';
-      
-      // Stamp OPENED if found, else default to HubSpot's delivery status
-      const status = isOpened ? 'OPENED' : (p.hs_email_status || 'SENT');
-      
       const subject = p.hs_email_subject || '(No Subject)';
       const body = p.hs_email_text || p.hs_email_html || '(No Body)';
       const timestamp = p.hs_timestamp ? new Date(p.hs_timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
@@ -346,9 +351,6 @@ async function syncEmailsAsNotes() {
         '',
         idTag
       ].filter(line => line !== null && line !== undefined).join('\n');
-
-      const hubspotContactId = assocMap[email.id];
-      const zohoContactId = hubspotContactId ? zohoContactMap[hubspotContactId] : null;
 
       if (zohoContactId) {
         const contactNotes = existingZohoNotes[zohoContactId] || [];
