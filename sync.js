@@ -49,17 +49,22 @@ async function zohoPost(module, data) {
     if (module === 'Accounts') checkFields = ['Account_Name'];
     if (module === 'Deals') checkFields = ['Deal_Name'];
     
-    const payload = { 
-      data: [data]
-    };
+    const payload = { data: [data] };
     
-    // Only add the duplicate check flag if we defined one
-    if (checkFields.length > 0) {
+    // Check if this module actually supports Zoho's upsert API
+    const supportsUpsert = ['Contacts', 'Accounts', 'Deals'].includes(module);
+    
+    // Set the correct URL: use /upsert for Contacts/Accounts/Deals, but standard POST for Tasks/Notes/Events
+    const endpointUrl = supportsUpsert 
+      ? `https://www.zohoapis.in/crm/v2/${module}/upsert`
+      : `https://www.zohoapis.in/crm/v2/${module}`;
+
+    if (supportsUpsert && checkFields.length > 0) {
       payload.duplicate_check_fields = checkFields;
     }
 
     const res = await axios.post(
-      `https://www.zohoapis.in/crm/v2/${module}/upsert`,
+      endpointUrl,
       payload,
       { headers: { Authorization: `Zoho-oauthtoken ${zohoAccessToken}` } }
     );
@@ -236,7 +241,7 @@ async function syncTasks() {
 async function syncEmailsAsNotes() {
   console.log('Syncing emails as notes...');
   
-  // --- SPEED OPTIMIZATION: Cache existing Zoho Notes ---
+  // --- SPEED OPTIMIZATION: Cache Zoho Notes ---
   console.log('Caching existing Zoho Notes...');
   const existingZohoNotes = {};
   let notesPage = 1;
@@ -267,25 +272,16 @@ async function syncEmailsAsNotes() {
     const params = {
       limit: 100,
       properties: [
-        'hs_email_subject',
-        'hs_email_text',
-        'hs_email_html',
-        'hs_email_status',
-        'hs_email_direction',
-        'hs_email_from_email',
-        'hs_email_from_firstname',
-        'hs_email_from_lastname',
-        'hs_email_to_email',
-        'hs_email_to_firstname',
-        'hs_email_to_lastname',
-        'hs_timestamp',
-        'createdate'
+        'hs_email_subject', 'hs_email_text', 'hs_email_html', 'hs_email_status',
+        'hs_email_direction', 'hs_email_from_email', 'hs_email_from_firstname',
+        'hs_email_from_lastname', 'hs_email_to_email', 'hs_email_to_firstname',
+        'hs_email_to_lastname', 'hs_timestamp', 'createdate'
       ].join(',')
     };
     if (after) params.after = after;
     const res = await hubspotGet('/crm/v3/objects/emails', params);
     
-    // Batch fetch associations for speed
+    // Batch fetch associations
     const emailIds = res.results.map(e => ({ id: e.id }));
     let assocMap = {};
     if (emailIds.length > 0) {
@@ -305,11 +301,33 @@ async function syncEmailsAsNotes() {
 
     for (const email of res.results) {
       const p = email.properties;
+      const recipientEmail = p.hs_email_to_email;
+      
+      // -- CHECK EVENTS API FOR OPENS --
+      let isOpened = false;
+      if (recipientEmail && p.hs_email_direction !== 'INCOMING_EMAIL') {
+        try {
+          const eventsRes = await hubspotGet('/email/public/v1/events', {
+            recipient: recipientEmail,
+            eventType: 'OPEN',
+            limit: 50
+          });
+          
+          if (eventsRes.events && eventsRes.events.length > 0) {
+            isOpened = true; 
+          }
+        } catch (e) {
+          // Ignore event fetch errors (e.g. strict scope limits)
+        }
+      }
 
       const fromName = [p.hs_email_from_firstname, p.hs_email_from_lastname].filter(Boolean).join(' ') || p.hs_email_from_email || 'Unknown';
       const toName = [p.hs_email_to_firstname, p.hs_email_to_lastname].filter(Boolean).join(' ') || p.hs_email_to_email || 'Unknown';
       const direction = p.hs_email_direction || 'EMAIL';
-      const status = p.hs_email_status || 'SENT';
+      
+      // Stamp OPENED if found, else default to HubSpot's delivery status
+      const status = isOpened ? 'OPENED' : (p.hs_email_status || 'SENT');
+      
       const subject = p.hs_email_subject || '(No Subject)';
       const body = p.hs_email_text || p.hs_email_html || '(No Body)';
       const timestamp = p.hs_timestamp ? new Date(p.hs_timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
@@ -337,7 +355,7 @@ async function syncEmailsAsNotes() {
         const existingEmailNote = contactNotes.find(n => n.Note_Content && n.Note_Content.includes(idTag));
 
         if (existingEmailNote) {
-          // UPDATE the existing note only if the status changed (e.g. from SENT to OPENED)
+          // UPDATE if status changed (e.g. from SENT to OPENED)
           if (!existingEmailNote.Note_Content.includes(`Status: ${status}`)) {
             await axios.put(
               `https://www.zohoapis.in/crm/v2/Notes/${existingEmailNote.id}`,
